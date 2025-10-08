@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import uuid
+import socket
 
 from ovs.db import idl
 from ovs import jsonrpc
@@ -167,6 +168,34 @@ def create_schema_helper(schema):
         schema = json.loads(schema)
     return idl.SchemaHelper(None, schema)
 
+def _resolve_connection(conn_str):
+    """Resolve hostname to IP in connection string if needed."""
+    parts = conn_str.split(':', 2)
+    if len(parts) < 2 or parts[0] in ('unix', 'punix'):
+        return conn_str
+
+    protocol, host = parts[0], parts[1]
+    port = parts[2] if len(parts) > 2 else None
+
+    # Skip if already an IP address (IPv4 or IPv6)
+    try:
+        socket.inet_aton(host)
+        return conn_str
+    except socket.error:
+        try:
+            socket.inet_pton(socket.AF_INET6, host)
+            return conn_str
+        except (socket.error, OSError):
+            pass
+
+    # Resolve hostname
+    try:
+        ip = socket.gethostbyname(host)
+        LOG.debug("Resolved %s to %s", host, ip)
+        return f"{protocol}:{ip}:{port}" if port else f"{protocol}:{ip}"
+    except socket.gaierror as e:
+        LOG.warning("Failed to resolve %s: %s", host, e)
+        return conn_str
 
 def fetch_schema_json(connection, schema_name):
     """Retrieve the schema json from an ovsdb-server
@@ -179,6 +208,7 @@ def fetch_schema_json(connection, schema_name):
     parsed_connections = parse_connection(connection)
 
     for c in parsed_connections:
+        c = _resolve_connection(c)
         err, strm = stream.Stream.open_block(
             stream.Stream.open(c))
         if err:
